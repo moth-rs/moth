@@ -14,10 +14,11 @@
     clippy::unused_async, // fix.
 )]
 
-use moth_data::structs::{Command, Context, Data, Error};
+use moth_data::structs::{Command, Context, Data, Error, PrefixContext};
 
 pub mod lob;
 pub mod meta;
+pub mod moderation;
 pub mod owner;
 pub mod register;
 pub mod starboard;
@@ -33,6 +34,7 @@ pub fn commands() -> Vec<Command> {
         .chain(lob::commands())
         .chain(utility::commands())
         .chain(starboard::commands())
+        .chain(moderation::commands())
         .collect()
 }
 

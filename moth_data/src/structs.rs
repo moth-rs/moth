@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
+pub type PrefixContext<'a> = poise::PrefixContext<'a, Data, Error>;
 pub type Command = poise::Command<Data, Error>;
 
 pub struct Data {
