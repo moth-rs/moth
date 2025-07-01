@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
     rename = "set-last-invocation",
     aliases("set-invoked"),
     prefix_command,
-    category = "Owner - Cooldowns",
+    category = "Admin - Cooldowns",
     owners_only,
     hide_in_help
 )]

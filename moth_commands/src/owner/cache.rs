@@ -1,17 +1,16 @@
-use crate::{moderation::msg_or_reaction, owner::owner, Context, Error};
+use crate::{owner::admin, Context, Error};
 use futures::StreamExt;
 
 use ::serenity::all::{collect, Event, GuildId};
 use lumi::serenity_prelude as serenity;
-use moth_core::emojis::Checkmark;
 use std::{fmt::Write, time::Duration};
 
 /// View/set max messages cached per channel.
 #[lumi::command(
     rename = "max-messages",
     prefix_command,
-    category = "Owner - Cache",
-    check = "owner",
+    category = "Admin - Cache",
+    check = "admin",
     hide_in_help
 )]
 pub async fn max_messages(
@@ -39,9 +38,9 @@ pub async fn max_messages(
 #[lumi::command(
     rename = "guild-cache-stats",
     prefix_command,
-    category = "Owner - Cache",
+    category = "Admin - Cache",
     hide_in_help,
-    check = "owner",
+    check = "admin",
     guild_only
 )]
 pub async fn guild_cache_stats(ctx: Context<'_>) -> Result<(), Error> {
@@ -73,9 +72,9 @@ pub async fn guild_cache_stats(ctx: Context<'_>) -> Result<(), Error> {
 #[lumi::command(
     rename = "guild-user-cache",
     prefix_command,
-    category = "Owner - Cache",
+    category = "Admin - Cache",
     hide_in_help,
-    check = "owner"
+    check = "admin"
 )]
 pub async fn guild_user_cache(
     ctx: Context<'_>,
@@ -196,26 +195,7 @@ async fn chunk_and_wait(ctx: Context<'_>, guild_id: GuildId) -> bool {
     false
 }
 
-#[lumi::command(
-    rename = "invalidate-response-cache",
-    prefix_command,
-    category = "Owner - Cache",
-    hide_in_help,
-    check = "owner"
-)]
-pub async fn invalidate_response_cache(ctx: crate::PrefixContext<'_>) -> Result<(), Error> {
-    ctx.data().database.invalidate_response_cache();
-    msg_or_reaction(ctx, "Done!", Checkmark::to_fixed_string()).await;
-
-    Ok(())
-}
-
 #[must_use]
-pub fn commands() -> [crate::Command; 4] {
-    [
-        max_messages(),
-        guild_cache_stats(),
-        guild_user_cache(),
-        invalidate_response_cache(),
-    ]
+pub fn commands() -> [crate::Command; 3] {
+    [max_messages(), guild_cache_stats(), guild_user_cache()]
 }

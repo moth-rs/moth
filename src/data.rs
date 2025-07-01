@@ -13,7 +13,7 @@ pub async fn setup() -> Arc<Data> {
     let config = moth_core::config::MothConfig::load_config();
     let starboard_config = starboard_config();
 
-    let auto_poop_users = sqlx::query!("SELECT user_id FROM auto_pooped")
+    let auto_poop_users = sqlx::query!("SELECT user_id FROM auto_bad_role")
         .fetch_all(&handler.db)
         .await
         .unwrap();

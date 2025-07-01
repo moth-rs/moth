@@ -1,24 +1,26 @@
-use crate::{owner::owner, Context, Error};
-use moth_ansi::RESET;
+use crate::{owner::admin, Context, Error};
 use lumi::serenity_prelude::{self as serenity, CreateEmbedFooter};
+use moth_ansi::RESET;
 use sqlx::{query, Pool, Postgres, Row};
 use std::fmt::Write;
 
 #[lumi::command(
     rename = "dbstats",
-    aliases("db-stats", "db-info"),
+    aliases("db-stats", "db-info", "dbinfo"),
     prefix_command,
-    category = "Owner - Database",
-    check = "owner",
+    category = "Admin - Database",
+    check = "admin",
     hide_in_help
 )]
 pub async fn dbstats(ctx: Context<'_>) -> Result<(), Error> {
     let db_pool = &ctx.data().database.db;
 
-    let messages_tables = [
+    let main = [
+        ("guilds", "id"),
+        ("channels", "id"),
         ("messages", "message_id"),
-        ("message_edits", "message_id"),
-        ("message_deletion", "message_id"),
+        ("users", "id"),
+        ("verified_users", "user_id"),
     ];
 
     let expressions = [
@@ -26,13 +28,24 @@ pub async fn dbstats(ctx: Context<'_>) -> Result<(), Error> {
         ("sticker_usage", "id"),
         ("emotes", "id"),
         ("emote_usage", "id"),
+        ("blocked_checked_emotes", "guild_id"),
+        ("blocked_checked_stickers", "guild_id"),
     ];
-    let misc_tables = [("dm_activity", "user_id"), ("starboard", "id")];
+
+    let misc_tables = [
+        ("dm_activity", "user_id"),
+        ("starboard", "id"),
+        ("starboard_overrides", "channel_id"),
+        ("transcendent_roles", "id"),
+        ("role_snapshots", "id"),
+        ("audit_log", "audit_log_id"),
+        ("executed_commands", "id"),
+    ];
 
     let mut embed = serenity::CreateEmbed::default().title("Database Stats");
 
     let (Ok(messages_info), Ok(expressions_info), Ok(misc_info)) = tokio::join!(
-        query_table_info(db_pool, &messages_tables),
+        query_table_info(db_pool, &main),
         query_table_info(db_pool, &expressions),
         query_table_info(db_pool, &misc_tables),
     ) else {
@@ -40,8 +53,8 @@ pub async fn dbstats(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
 
-    embed = embed.field("Messages", messages_info, true);
-    embed = embed.field("Names", expressions_info, true);
+    embed = embed.field("Core", messages_info, true);
+    embed = embed.field("Expressions", expressions_info, true);
     embed = embed.field("Miscellaneous", misc_info, true);
 
     let db_size_query = "SELECT pg_database_size(current_database())";
@@ -75,7 +88,7 @@ async fn query_table_info(
 #[lumi::command(
     rename = "sql",
     prefix_command,
-    category = "Owner - Database",
+    category = "Admin - Database",
     owners_only,
     hide_in_help
 )]

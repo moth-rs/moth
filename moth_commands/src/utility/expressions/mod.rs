@@ -1,8 +1,5 @@
 use crate::{Context, Error};
 use std::{borrow::Cow, fmt};
-mod last_reactions;
-// TODO: sorta combine with the one in utils
-mod last_reactions_paginator;
 mod query;
 mod utils;
 
@@ -77,7 +74,7 @@ pub fn string_to_expression(emoji: &str) -> Option<Expression<'_>> {
 /// Display usage of a reaction.
 #[lumi::command(slash_command, prefix_command, category = "Utility", guild_only)]
 pub async fn reactions(ctx: Context<'_>, emoji: String) -> Result<(), Error> {
-    let types: [EmoteUsageType; 1] = [EmoteUsageType::ReactionAdd];
+    let types: [EmoteUsageType; 1] = [EmoteUsageType::Reaction];
     shared(ctx, emoji, &types, Some(false)).await
 }
 
@@ -91,7 +88,7 @@ pub async fn messages(ctx: Context<'_>, emoji: String) -> Result<(), Error> {
 /// Display usage of emojis everywhere.
 #[lumi::command(slash_command, prefix_command, category = "Utility", guild_only)]
 pub async fn all(ctx: Context<'_>, emoji: String) -> Result<(), Error> {
-    let types = [EmoteUsageType::ReactionAdd, EmoteUsageType::Message];
+    let types = [EmoteUsageType::Reaction, EmoteUsageType::Message];
     shared(ctx, emoji, &types, None).await
 }
 
@@ -103,8 +100,7 @@ async fn shared(
 ) -> Result<(), Error> {
     if &emoji == "⭐"
         && ctx.guild_id() == Some(98226572468690944.into())
-        && (types.contains(&EmoteUsageType::ReactionAdd)
-            || types.contains(&EmoteUsageType::ReactionRemove))
+        && types.contains(&EmoteUsageType::Reaction)
     {
         ctx.say("Checking the star reaction usage is disabled to help prevent farming.")
             .await?;
@@ -143,6 +139,6 @@ async fn shared(
 // /sticker-leaderboard [duration]
 
 #[must_use]
-pub fn commands() -> [crate::Command; 2] {
-    [emoji_usage(), last_reactions::last_reactions()]
+pub fn commands() -> [crate::Command; 1] {
+    [emoji_usage()]
 }

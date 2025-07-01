@@ -1,4 +1,0 @@
-ALTER TABLE starboard
-ADD COLUMN forwarded BOOLEAN DEFAULT FALSE NOT NULL,
-ADD COLUMN reply_message_id BIGINT,
-ADD COLUMN reply_username TEXT;

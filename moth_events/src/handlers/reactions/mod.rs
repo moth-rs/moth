@@ -46,7 +46,7 @@ pub async fn reaction_add(
         guild_name, channel_name, user_name, add_reaction.emoji
     );
 
-    let _ = insert_addition(&data.database, guild_id.unwrap(), user_id, add_reaction).await;
+    let _ = insert_addition(ctx, user_id, add_reaction).await;
 
     if add_reaction.guild_id == Some(data.starboard_config.guild_id) {
         if let serenity::ReactionType::Unicode(ref unicode) = add_reaction.emoji {
@@ -118,7 +118,7 @@ pub async fn reaction_remove(
         guild_name, channel_name, user_name, removed_reaction.emoji
     );
 
-    insert_removal(&data.database, guild_id.unwrap(), user_id, removed_reaction).await?;
+    /*     insert_removal(&data.database, guild_id.unwrap(), user_id, removed_reaction).await?; */
 
     if removed_reaction.guild_id == Some(data.starboard_config.guild_id) {
         if let serenity::ReactionType::Unicode(ref unicode) = removed_reaction.emoji {

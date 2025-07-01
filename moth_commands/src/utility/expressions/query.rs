@@ -10,7 +10,8 @@ pub(super) async fn handle_expression_query(
     guild_id: GuildId,
     types: &[EmoteUsageType],
 ) -> Result<Vec<ExpressionCounts>, Error> {
-    let guild_id = guild_id.get() as i64;
+    let guild_id = database.get_guild(guild_id).await?;
+
     let results = match expression {
         Expression::Id(id) | Expression::Emote((id, _)) => {
             let id = *id;

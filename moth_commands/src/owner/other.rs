@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 
 use std::fmt::Write;
 
-use crate::{owner::owner, Context, Error};
+use crate::{owner::admin, Context, Error};
 
 #[lumi::command(
     prefix_command,
@@ -38,8 +38,8 @@ pub async fn shutdown(ctx: crate::PrefixContext<'_>) -> Result<(), Error> {
 #[lumi::command(
     prefix_command,
     hide_in_help,
-    check = "owner",
-    category = "Owner - Say"
+    check = "admin",
+    category = "Admin - Say"
 )]
 pub async fn say(
     ctx: Context<'_>,
@@ -61,7 +61,7 @@ pub async fn say(
 ///
 /// Allowed mentions by default are set to true.
 #[allow(clippy::too_many_arguments)]
-#[lumi::command(slash_command, hide_in_help, check = "owner", category = "Owner - Say")]
+#[lumi::command(slash_command, hide_in_help, check = "admin", category = "Admin - Say")]
 pub async fn say_slash(
     ctx: Context<'_>,
     // Have to manually parse this because discord guild command.
@@ -142,8 +142,8 @@ pub async fn say_slash(
 #[lumi::command(
     prefix_command,
     hide_in_help,
-    category = "Owner - Say",
-    check = "owner"
+    category = "Admin - Say",
+    check = "admin"
 )]
 pub async fn dm(
     ctx: Context<'_>,
@@ -166,8 +166,8 @@ pub async fn dm(
 #[lumi::command(
     prefix_command,
     hide_in_help,
-    category = "Owner - Messages",
-    check = "owner"
+    category = "Admin - Messages",
+    check = "admin"
 )]
 pub async fn react(
     ctx: Context<'_>,
@@ -199,8 +199,8 @@ async fn malloc_trim(ctx: Context<'_>) -> Result<(), Error> {
 #[lumi::command(
     rename = "chunk-guild-members",
     prefix_command,
-    check = "owner",
-    category = "Owner - Cache",
+    check = "admin",
+    category = "Admin - Cache",
     hide_in_help,
     guild_only
 )]
@@ -222,8 +222,8 @@ async fn chunk_guild_members(ctx: Context<'_>, presences: Option<bool>) -> Resul
 #[lumi::command(
     rename = "fw-commands",
     prefix_command,
-    check = "owner",
-    category = "Owner - Commands",
+    check = "admin",
+    category = "Admin - Commands",
     hide_in_help,
     guild_only
 )]
@@ -282,8 +282,8 @@ async fn sudo(
 
 #[lumi::command(
     prefix_command,
-    check = "owner",
-    category = "Owner - Commands",
+    check = "admin",
+    category = "Admin - Commands",
     hide_in_help,
     guild_only
 )]
@@ -296,8 +296,8 @@ async fn analyze(ctx: Context<'_>, #[rest] msg: String) -> Result<(), Error> {
 #[lumi::command(
     rename = "members-dump",
     prefix_command,
-    check = "owner",
-    category = "Owner - Commands",
+    check = "admin",
+    category = "Admin - Commands",
     hide_in_help,
     guild_only
 )]
@@ -336,7 +336,7 @@ async fn members_dump(ctx: Context<'_>, full: Option<bool>) -> Result<(), Error>
 #[lumi::command(
     prefix_command,
     owners_only,
-    category = "Owner - Commands",
+    category = "Admin - Commands",
     hide_in_help
 )]
 async fn http(ctx: Context<'_>, #[rest] input: String) -> Result<(), Error> {

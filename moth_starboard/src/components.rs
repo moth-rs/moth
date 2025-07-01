@@ -108,8 +108,17 @@ async fn accept(
         )
         .await;
 
+    // required to copy the bot id, for whatever reason rust wont copy it here without explicitly saying so.
+    #[expect(unused_braces)]
+    // TODO: rewrite.
     data.database
-        .approve_starboard(interaction.message.id, new_msg.id, new_msg.channel_id)
+        .approve_starboard(
+            { ctx.cache.current_user().id },
+            interaction.message.id,
+            interaction.message.channel_id,
+            new_msg.id,
+            new_msg.channel_id,
+        )
         .await?;
 
     Ok(())

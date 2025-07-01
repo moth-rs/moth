@@ -51,7 +51,12 @@ pub async fn command_check(ctx: Context<'_>) -> Result<bool, Error> {
         return Ok(true);
     }
 
-    let user_banned = ctx.data().database.is_banned(&ctx.author().id);
+    let user_banned = ctx
+        .data()
+        .database
+        .get_user(ctx.author().id)
+        .await?
+        .is_banned();
 
     if user_banned {
         notify_user_ban(ctx).await?;

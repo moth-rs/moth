@@ -86,7 +86,7 @@ pub async fn set_gradient(
 
     let existing_role_id = sqlx::query!(
         "SELECT role_id FROM transcendent_roles WHERE user_id = $1",
-        ctx.author().id.get() as i64
+        &ctx.data().database.get_user(ctx.author().id).await?.id
     )
     .fetch_optional(&ctx.data().database.db)
     .await?
@@ -203,11 +203,11 @@ async fn create_role_and_insert(
             EditRole::new()
                 .name("TRANSCENDENT-GRADIENT")
                 .position(poop_position)
-                .colours(dbg!(RoleColours {
+                .colours(RoleColours {
                     primary_colour: colour_primary,
                     secondary_colour: colour_secondary,
                     tertiary_colour: None,
-                }))
+                })
                 .permissions(Permissions::empty()),
         )
         .await
@@ -217,7 +217,12 @@ async fn create_role_and_insert(
     sqlx::query!(
         "INSERT INTO transcendent_roles (id, user_id, role_id) VALUES ($1, $2, $3)",
         reserved_id as i16,
-        ctx.author().id.get() as i64,
+        &ctx.data()
+            .database
+            .get_user(ctx.author().id)
+            .await
+            .map_err(|_| "Could not fetch user from database, you do NOT exist.")?
+            .id,
         role_id.get() as i64,
     )
     .execute(&ctx.data().database.db)

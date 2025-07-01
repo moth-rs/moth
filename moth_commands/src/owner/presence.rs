@@ -1,6 +1,6 @@
 use lumi::serenity_prelude::{ActivityData, ActivityType};
 
-use crate::{owner::owner, Context, Error};
+use crate::{owner::admin, Context, Error};
 
 use small_fixed_array::FixedString;
 
@@ -16,8 +16,8 @@ pub enum OnlineStatus {
 
 #[lumi::command(
     prefix_command,
-    check = "owner",
-    category = "Owner - Presence",
+    check = "admin",
+    category = "Admin - Presence",
     track_edits,
     hide_in_help
 )]
@@ -50,8 +50,8 @@ pub async fn status(
 #[lumi::command(
     rename = "reset-presence",
     prefix_command,
-    category = "Owner - Presence",
-    check = "owner",
+    category = "Admin - Presence",
+    check = "admin",
     hide_in_help
 )]
 pub async fn reset_presence(ctx: Context<'_>) -> Result<(), Error> {
@@ -64,8 +64,8 @@ pub async fn reset_presence(ctx: Context<'_>) -> Result<(), Error> {
 #[lumi::command(
     rename = "set-activity",
     prefix_command,
-    category = "Owner - Presence",
-    check = "owner",
+    category = "Admin - Presence",
+    check = "admin",
     track_edits,
     hide_in_help
 )]

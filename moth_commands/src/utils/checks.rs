@@ -21,16 +21,10 @@ pub async fn handle_allow_cmd(
     // Check if the command or its aliases match a real command.
     let command_name = get_cmd_name(commands, &cmd_name)?;
 
-    // TODO: handle errors better.
-    let existed = data
-        .database
-        .set_owner(user.id, Some(&command_name))
+    data.database
+        .set_admin(user.id, Some(&command_name), true)
         .await
-        .map_err(|_| CommandRestrictErr::AlreadyExists)?;
-
-    if existed {
-        return Err(CommandRestrictErr::AlreadyExists);
-    }
+        .map_err(|_| CommandRestrictErr::DoesntExist)?;
 
     Ok(command_name)
 }
@@ -45,7 +39,7 @@ pub fn get_cmd_name(
         if !command
             .category
             .as_deref()
-            .is_some_and(|c| c.to_lowercase().starts_with("owner"))
+            .is_some_and(|c| c.to_lowercase().starts_with("admin"))
         {
             continue;
         }
@@ -92,15 +86,10 @@ pub async fn handle_deny_cmd(
     let command_name = get_cmd_name(commands, cmd_name)?;
 
     // TODO: handle errors better.
-    let existed = data
-        .database
-        .remove_owner(user.id, Some(&command_name))
+    data.database
+        .set_admin(user.id, Some(&command_name), false)
         .await
         .map_err(|_| CommandRestrictErr::DoesntExist)?;
-
-    if !existed {
-        return Err(CommandRestrictErr::DoesntExist);
-    }
 
     Ok(command_name)
 }

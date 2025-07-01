@@ -1,18 +1,19 @@
-use ::serenity::all::{GuildId, Reaction, ReactionType, UserId};
+use ::serenity::all::{Context, Reaction, ReactionType, UserId};
 use chrono::Utc;
 use sqlx::query;
 
 use crate::Error;
 
-use moth_core::data::database::{Database, EmoteUsageType};
+use moth_core::data::{database::EmoteUsageType, structs::Data};
 
 async fn insert_emote_usage(
-    database: &Database,
-    guild_id: GuildId,
+    ctx: &Context,
     user_id: UserId,
     reaction: &Reaction,
     usage_type: EmoteUsageType,
 ) -> Result<(), Error> {
+    let database = &ctx.data_ref::<Data>().database;
+
     let (name, id) = match &reaction.emoji {
         ReactionType::Custom {
             animated: _,
@@ -27,12 +28,25 @@ async fn insert_emote_usage(
         _ => return Ok(()),
     };
 
-    database
-        .insert_channel(reaction.channel_id, Some(guild_id))
-        .await?;
-    database.insert_user(user_id).await?;
+    // reaction user
+    let user_id = database.get_user(user_id).await?.id;
 
-    // This is so fucking dumb.
+    // to get the reaction's message's id
+    let reaction_message_id =
+        if let Some(msg) = database.get_cached_message(&reaction.message_id) {
+            msg
+        } else {
+            let message = reaction.message(&ctx).await?;
+            database
+                .get_message(
+                    message.id,
+                    message.channel_id,
+                    message.guild_id,
+                    message.author.id,
+                )
+                .await?
+        }
+        .id;
 
     let id = if let Some(id) = id {
         let id = query!(
@@ -46,27 +60,38 @@ async fn insert_emote_usage(
         id.id
     } else {
         let id = query!(
-            "INSERT INTO emotes (emote_name)
-                     VALUES ($1)
-                     ON CONFLICT (emote_name) WHERE discord_id IS NULL
-                     DO UPDATE SET discord_id = emotes.discord_id
-                     RETURNING id",
+            r#"
+            WITH input_rows(emote_name) AS (
+                VALUES ($1::text)
+            ),
+            ins AS (
+                INSERT INTO emotes (emote_name)
+                SELECT emote_name FROM input_rows
+                ON CONFLICT (emote_name) WHERE discord_id IS NULL DO NOTHING
+                RETURNING id
+            )
+            SELECT id AS "id!" FROM ins
+            UNION ALL
+            SELECT e.id AS "id!"
+            FROM emotes e
+            JOIN input_rows i ON e.emote_name = i.emote_name
+            WHERE e.discord_id IS NULL;
+            "#,
             &name.as_str(),
         )
         .fetch_one(&database.db)
         .await?;
+
         id.id
     };
 
     query!(
-        "INSERT INTO emote_usage (emote_id, message_id, user_id, channel_id, guild_id,
-    used_at, usage_type) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        i64::from(id),
-        reaction.message_id.get() as i64,
-        user_id.get() as i64,
-        reaction.channel_id.get() as i64,
-        guild_id.get() as i64,
-        Utc::now().timestamp(),
+        "INSERT INTO emote_usage (emote_id, message_id, user_id, used_at, usage_type) VALUES ($1, \
+         $2, $3, $4, $5)",
+        id,
+        reaction_message_id,
+        user_id,
+        Utc::now(),
         usage_type as _,
     )
     .execute(&database.db)
@@ -76,36 +101,10 @@ async fn insert_emote_usage(
 }
 
 pub(super) async fn insert_addition(
-    database: &Database,
-    guild_id: GuildId,
+    ctx: &Context,
     user_id: UserId,
     reaction: &Reaction,
 ) -> Result<(), Error> {
-    insert_emote_usage(
-        database,
-        guild_id,
-        user_id,
-        reaction,
-        EmoteUsageType::ReactionAdd,
-    )
-    .await?;
-    Ok(())
-}
-
-pub(super) async fn insert_removal(
-    database: &Database,
-    guild_id: GuildId,
-    user_id: UserId,
-    reaction: &Reaction,
-) -> Result<(), Error> {
-    insert_emote_usage(
-        database,
-        guild_id,
-        user_id,
-        reaction,
-        EmoteUsageType::ReactionRemove,
-    )
-    .await?;
-
+    insert_emote_usage(ctx, user_id, reaction, EmoteUsageType::Reaction).await?;
     Ok(())
 }

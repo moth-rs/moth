@@ -1,12 +1,11 @@
 use ::serenity::{
-    all::{GenericChannelId, MessageId, ReactionType, RoleId},
+    all::{GenericChannelId, MessageId, RoleId},
     futures::FutureExt,
-    small_fixed_array,
+    small_fixed_array::FixedString,
 };
 use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use parking_lot::Mutex;
-use regex::Regex;
 use rosu_v2::{model::GameMode, prelude::UserExtended};
 use serenity::all::UserId;
 use sqlx::{Executor, PgPool, postgres::PgPoolOptions, query};
@@ -14,7 +13,9 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     pin::Pin,
+    sync::Arc,
     task::Poll,
+    time::Duration,
 };
 use tokio::time::Timeout;
 
@@ -22,16 +23,12 @@ use crate::data::structs::{DmActivity, Error};
 
 use lumi::serenity_prelude as serenity;
 
-use std::ops::Deref;
-
-use super::responses::{GuildCache, RegexData, ResponseCache, ResponseType};
-
 macro_rules! id_wrapper {
-    ($wrapper_name:ident, $inner_name:ident) => {
+    ($wrapper_name:ident, $maybe_name:ident, $inner_name:ident) => {
         #[derive(Clone, Copy, PartialEq, Debug)]
         pub struct $wrapper_name(pub $inner_name);
 
-        impl Deref for $wrapper_name {
+        impl std::ops::Deref for $wrapper_name {
             type Target = $inner_name;
 
             fn deref(&self) -> &Self::Target {
@@ -39,43 +36,41 @@ macro_rules! id_wrapper {
             }
         }
 
-        /// Convert from i64
         impl From<i64> for $wrapper_name {
             fn from(item: i64) -> Self {
                 $wrapper_name($inner_name::new(item as u64))
             }
         }
+
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        pub struct $maybe_name(pub Option<$wrapper_name>);
+
+        impl $maybe_name {
+            #[must_use]
+            pub fn new(option: Option<$wrapper_name>) -> Self {
+                $maybe_name(option)
+            }
+        }
+
+        impl From<Option<i64>> for $maybe_name {
+            fn from(option: Option<i64>) -> Self {
+                $maybe_name(option.map($wrapper_name::from))
+            }
+        }
+
+        impl std::ops::Deref for $maybe_name {
+            type Target = Option<$wrapper_name>;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
     };
 }
 
-id_wrapper!(UserIdWrapper, UserId);
-id_wrapper!(ChannelIdWrapper, GenericChannelId);
-id_wrapper!(MessageIdWrapper, MessageId);
-
-/// Because don't we all hate the orphan rule.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct MaybeMessageIdWrapper(pub Option<MessageIdWrapper>);
-
-impl MaybeMessageIdWrapper {
-    #[must_use]
-    pub fn new(option: Option<MessageIdWrapper>) -> Self {
-        MaybeMessageIdWrapper(option)
-    }
-}
-
-impl From<Option<i64>> for MaybeMessageIdWrapper {
-    fn from(option: Option<i64>) -> Self {
-        MaybeMessageIdWrapper(option.map(MessageIdWrapper::from))
-    }
-}
-
-impl Deref for MaybeMessageIdWrapper {
-    type Target = Option<MessageIdWrapper>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+id_wrapper!(UserIdWrapper, MaybeUserIdWrapper, UserId);
+id_wrapper!(ChannelIdWrapper, MaybeChannelIdWrapper, GenericChannelId);
+id_wrapper!(MessageIdWrapper, MaybeMessageIdWrapper, MessageId);
 
 pub async fn init_data() -> Database {
     let database_url =
@@ -96,70 +91,97 @@ pub async fn init_data() -> Database {
         .await
         .expect("Unable to apply migrations!");
 
-    let user_ids = query!("SELECT user_id FROM banned_users")
-        .fetch_all(&database)
-        .await
-        .unwrap();
-
-    let banned_users = user_ids
-        .iter()
-        .map(|r| UserId::new(r.user_id as u64))
-        .collect::<DashSet<UserId>>();
-
-    let db_checks = query!("SELECT * FROM owner_access")
-        .fetch_all(&database)
-        .await
-        .unwrap();
-
-    let checks = Checks::default();
-
-    for check in db_checks {
-        if let Some(command_name) = check.command_name {
-            let mut entry = checks
-                .owners_single
-                .entry(command_name)
-                .or_insert_with(HashSet::new);
-            entry.insert(UserId::new(check.user_id as u64));
-        } else {
-            checks.owners_all.insert(UserId::new(check.user_id as u64));
-        }
-    }
+    let cache = mini_moka::sync::CacheBuilder::new(500)
+        .time_to_idle(Duration::from_secs(3600))
+        .build();
 
     Database {
         starboard: Mutex::new(
             StarboardHandler::new(&database)
                 .await
-                .expect("Database must be avaliable."),
+                .expect("should be setup correctly."),
         ),
         db: database,
-        owner_overwrites: checks,
-        banned_users,
+        users: cache,
         dm_activity: DashMap::new(),
-        responses: ResponseCache::default(),
+        channels: DashMap::new(),
+        guilds: DashMap::new(),
+        messages: DashMap::new(),
     }
 }
 
 /// Custom type.
 #[derive(Debug, Clone, sqlx::Type, PartialEq)]
-#[sqlx(type_name = "emoteusagetype")]
+#[sqlx(type_name = "emoteusagetype", rename_all = "lowercase")]
 pub enum EmoteUsageType {
     Message,
-    ReactionAdd,
-    ReactionRemove,
+    Reaction,
 }
 
 pub struct Database {
     pub db: PgPool,
-    banned_users: DashSet<UserId>,
-    owner_overwrites: Checks,
-    // TODO: return privacy
+    users: mini_moka::sync::Cache<UserId, Arc<ApplicationUser>>,
+    // TODO: simplify this store.
+    guilds: DashMap<serenity::GuildId, i32>,
+    channels: DashMap<serenity::GenericChannelId, (i32, Option<i32>)>,
+    messages: DashMap<serenity::MessageId, MessageData>,
     pub starboard: Mutex<StarboardHandler>,
-
+    // TODO: try and keep private and rewrite them when i eventually redo my users and starboard part.
     /// Runtime caches for dm activity.
     pub(crate) dm_activity: DashMap<UserId, DmActivity>,
+}
 
-    /// caches for regex autoresponse stuff.
-    pub(crate) responses: ResponseCache,
+pub struct Transaction<'a> {
+    #[expect(dead_code)]
+    database: &'a Database,
+    tx: sqlx::Transaction<'a, sqlx::Postgres>,
+}
+
+impl<'a> Database {
+    pub async fn begin_transaction(&'a self) -> Result<Transaction<'a>, sqlx::Error> {
+        let tx = self.db.begin().await?;
+
+        Ok(Transaction { database: self, tx })
+    }
+}
+
+impl Transaction<'_> {
+    pub async fn commit(self) -> Result<(), sqlx::Error> {
+        self.tx.commit().await
+    }
+
+    pub async fn rollback(self) -> Result<(), sqlx::Error> {
+        self.tx.rollback().await
+    }
+}
+
+#[bool_to_bitflags::bool_to_bitflags]
+pub struct ApplicationUser {
+    pub id: i32,
+    pub is_banned: bool,
+    pub is_admin: bool,
+    pub allowed_admin_commands: Option<Vec<FixedString<u8>>>,
+}
+
+impl ApplicationUser {
+    #[must_use]
+    pub fn new(
+        id: i32,
+        is_banned: bool,
+        is_admin: bool,
+        allowed_admin_commands: Option<Vec<FixedString<u8>>>,
+    ) -> Self {
+        let mut app = Self {
+            id,
+            allowed_admin_commands,
+            __generated_flags: ApplicationUserGeneratedFlags::empty(),
+        };
+
+        app.set_is_admin(is_admin);
+        app.set_is_banned(is_banned);
+
+        app
+    }
 }
 
 #[derive(Debug)]
@@ -217,6 +239,7 @@ pub struct StarboardMessage {
     pub starboard_message_channel: ChannelIdWrapper,
     pub reply_message_id: MaybeMessageIdWrapper,
     pub reply_username: Option<String>,
+    pub reply_user_id: MaybeUserIdWrapper,
     pub forwarded: bool,
 }
 
@@ -229,211 +252,368 @@ pub enum StarboardStatus {
 }
 
 impl Database {
-    pub async fn insert_user(&self, user_id: serenity::UserId) -> Result<(), Error> {
-        query!(
-            "INSERT INTO users (user_id)
-            VALUES ($1)
-            ON CONFLICT (user_id) DO NOTHING",
-            user_id.get() as i64
-        )
-        .execute(&self.db)
-        .await?;
+    pub async fn get_user(&self, user_id: serenity::UserId) -> Result<Arc<ApplicationUser>, Error> {
+        if let Some(user) = self.users.get(&user_id) {
+            return Ok(user);
+        }
 
-        Ok(())
+        self.insert_user_(user_id).await.map(Arc::new)
     }
 
-    pub async fn insert_channel(
+    pub async fn insert_user_(&self, user_id: serenity::UserId) -> Result<ApplicationUser, Error> {
+        let row = query!(
+            r#"
+            WITH input_rows(user_id) AS (
+                VALUES ($1::bigint)
+            ),
+            ins AS (
+                INSERT INTO users (user_id)
+                SELECT user_id FROM input_rows
+                ON CONFLICT (user_id) DO NOTHING
+                RETURNING
+                    id,
+                    is_bot_banned,
+                    is_bot_admin,
+                    allowed_admin_commands
+            )
+            SELECT
+                id AS "id!",
+                is_bot_banned AS "is_bot_banned!",
+                is_bot_admin AS "is_bot_admin!",
+                allowed_admin_commands
+            FROM ins
+            UNION ALL
+            SELECT
+                u.id AS "id!",
+                u.is_bot_banned AS "is_bot_banned!",
+                u.is_bot_admin AS "is_bot_admin!",
+                u.allowed_admin_commands
+            FROM users u
+            JOIN input_rows i USING (user_id);
+            "#,
+            user_id.get() as i64
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        let application_user = ApplicationUser::new(
+            row.id,
+            row.is_bot_banned,
+            row.is_bot_admin,
+            row.allowed_admin_commands.map(|i| {
+                i.iter()
+                    .map(|s| FixedString::from_str_trunc(s))
+                    .collect::<Vec<_>>()
+            }),
+        );
+
+        Ok(application_user)
+    }
+
+    /// Gets the channel from the database, or inserts it if it doesn't exist, returning the inner `channel_id`, and `guild_id` values.
+    pub async fn get_channel(
         &self,
         channel_id: serenity::GenericChannelId,
         guild_id: Option<serenity::GuildId>,
-    ) -> Result<(), Error> {
-        if let Some(guild_id) = guild_id {
-            self.insert_guild(guild_id).await?;
+    ) -> Result<(i32, Option<i32>), Error> {
+        if let Some(id) = self.channels.get(&channel_id) {
+            let value = id.value();
+            return Ok((value.0, value.1));
         }
 
-        query!(
-            "INSERT INTO channels (channel_id, guild_id)
-             VALUES ($1, $2)
-             ON CONFLICT (channel_id) DO NOTHING",
-            channel_id.get() as i64,
-            guild_id.map(|g| g.get() as i64),
-        )
-        .execute(&self.db)
-        .await?;
-
-        Ok(())
+        self.insert_channel_(channel_id, guild_id).await
     }
 
-    pub async fn insert_guild(&self, guild_id: serenity::GuildId) -> Result<(), Error> {
-        query!(
-            "INSERT INTO guilds (guild_id)
-             VALUES ($1)
-             ON CONFLICT (guild_id) DO NOTHING",
+    // inserts the channel and guild_id, returning both the inner ids if available.
+    async fn insert_channel_(
+        &self,
+        channel_id: serenity::GenericChannelId,
+        guild_id: Option<serenity::GuildId>,
+    ) -> Result<(i32, Option<i32>), Error> {
+        let inner_guild_id = if let Some(guild_id) = guild_id {
+            Some(self.get_guild(guild_id).await?)
+        } else {
+            None
+        };
+
+        let row = query!(
+            r#"
+            WITH input_rows(channel_id, guild_id) AS (
+                VALUES ($1::bigint, $2::int)
+            ),
+            ins AS (
+                INSERT INTO channels (channel_id, guild_id)
+                SELECT channel_id, guild_id FROM input_rows
+                ON CONFLICT (channel_id) DO NOTHING
+                RETURNING id
+            )
+            SELECT id AS "id!" FROM ins
+            UNION ALL
+            SELECT c.id AS "id!" FROM channels c
+            JOIN input_rows i USING (channel_id);
+            "#,
+            channel_id.get() as i64,
+            inner_guild_id,
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        Ok((row.id, inner_guild_id))
+    }
+
+    pub async fn get_message(
+        &self,
+        message_id: MessageId,
+        channel_id: serenity::GenericChannelId,
+        guild_id: Option<serenity::GuildId>,
+        user_id: UserId,
+    ) -> Result<MessageData, Error> {
+        if let Some(message) = self.messages.get(&message_id) {
+            return Ok(*message);
+        }
+
+        let (channel_id, guild_id) = self.get_channel(channel_id, guild_id).await?;
+        let user_id = self.get_user(user_id).await?.id;
+
+        let row = query!(
+            r#"
+            WITH input_rows(message_id, channel_id, user_id, guild_id) AS (
+                VALUES ($1::bigint, $2::int, $3::int, $4::int)
+            ),
+            ins AS (
+                INSERT INTO messages (message_id, channel_id, user_id, guild_id)
+                SELECT message_id, channel_id, user_id, guild_id FROM input_rows
+                ON CONFLICT (message_id) DO NOTHING
+                RETURNING id
+            )
+            SELECT id AS "id!" FROM ins
+            UNION ALL
+            SELECT m.id AS "id!" FROM messages m
+            JOIN input_rows i USING (message_id);
+            "#,
+            message_id.get() as i64,
+            channel_id,
+            user_id,
+            guild_id
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        let message_data = MessageData {
+            id: row.id,
+            channel_id,
+            guild_id,
+            user_id,
+        };
+        self.messages.insert(message_id, message_data);
+
+        Ok(message_data)
+    }
+
+    /// a version of `Self::get_messages` that will not insert if not present.
+    pub async fn get_message_dataless(&self, message_id: MessageId) -> Result<MessageData, Error> {
+        if let Some(message) = self.messages.get(&message_id) {
+            return Ok(*message);
+        }
+
+        let message_data = sqlx::query_as!(
+            MessageData,
+            "SELECT id, channel_id, user_id, guild_id FROM messages WHERE message_id = $1",
+            message_id.get() as i64
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        self.messages.insert(message_id, message_data);
+
+        Ok(message_data)
+    }
+
+    pub fn get_cached_message(&self, message_id: &MessageId) -> Option<MessageData> {
+        self.messages.get(message_id).map(|v| *v)
+    }
+
+    /// Gets the guild from the database, or inserts it if it doesn't exist, returning the inner id value.
+    pub async fn get_guild(&self, guild_id: serenity::GuildId) -> Result<i32, Error> {
+        if let Some(id) = self.guilds.get(&guild_id) {
+            return Ok(*id.value());
+        }
+
+        self.insert_guild_(guild_id).await
+    }
+
+    async fn insert_guild_(&self, guild_id: serenity::GuildId) -> Result<i32, Error> {
+        let row = query!(
+            r#"
+            WITH input_rows(guild_id) AS (
+                VALUES ($1::bigint)
+            ),
+            ins AS (
+                INSERT INTO guilds (guild_id)
+                SELECT guild_id FROM input_rows
+                ON CONFLICT (guild_id) DO NOTHING
+                RETURNING id
+            )
+            SELECT id AS "id!" FROM ins
+            UNION ALL
+            SELECT g.id AS "id!" FROM guilds g
+            JOIN input_rows i USING (guild_id);
+        "#,
             guild_id.get() as i64
         )
-        .execute(&self.db)
+        .fetch_one(&self.db)
         .await?;
 
-        Ok(())
-    }
-
-    /// Checks if a user is banned from using commands.
-    #[must_use]
-    pub fn is_banned(&self, user_id: &UserId) -> bool {
-        self.banned_users.contains(user_id)
-    }
-
-    pub fn invalidate_response_cache(&self) {
-        self.responses.guild.clear();
+        Ok(row.id)
     }
 
     /// Sets the user banned/unbanned from the bot, returning the old status.
-    pub async fn set_banned(&self, user_id: UserId, banned: bool) -> Result<bool, Error> {
-        if banned == self.banned_users.contains(&user_id) {
-            return Ok(banned);
-        }
+    pub async fn set_banned(&self, user_id: UserId, set_banned: bool) -> Result<(), Error> {
+        let is_cached = if let Some(cached_user) = self.users.get(&user_id) {
+            if cached_user.is_banned() == set_banned {
+                return Ok(());
+            }
 
-        let old_status = self.banned_users.contains(&user_id);
+            true
+        } else {
+            false
+        };
 
-        if banned {
-            self.banned_users.insert(user_id);
-            self.insert_user(user_id).await?;
+        if is_cached {
             query!(
-                "INSERT INTO banned_users (user_id) VALUES ($1)",
+                "UPDATE users SET is_bot_banned  = $1 WHERE user_id = $2",
+                set_banned,
                 user_id.get() as i64
             )
             .execute(&self.db)
             .await?;
         } else {
-            self.banned_users.remove(&user_id);
-            query!(
-                "DELETE FROM banned_users WHERE user_id = $1",
-                user_id.get() as i64
+            let row = query!(
+                r#"
+                INSERT INTO users (user_id, is_bot_banned)
+                VALUES ($1, $2)
+                ON CONFLICT (user_id)
+                DO UPDATE SET is_bot_banned = EXCLUDED.is_bot_banned
+                RETURNING id, is_bot_admin, allowed_admin_commands
+                "#,
+                user_id.get() as i64,
+                set_banned
             )
-            .execute(&self.db)
+            .fetch_one(&self.db)
             .await?;
+
+            let application_user = ApplicationUser::new(
+                row.id,
+                set_banned,
+                row.is_bot_admin,
+                row.allowed_admin_commands.map(|i| {
+                    i.iter()
+                        .map(|s| FixedString::from_str_trunc(s))
+                        .collect::<Vec<_>>()
+                }),
+            );
+
+            self.users.insert(user_id, Arc::new(application_user));
         }
 
-        Ok(old_status)
+        Ok(())
     }
 
-    /// To be called in a function that uses the owner check.
-    #[must_use]
-    pub fn check_owner(&self, user_id: UserId, command: &str) -> bool {
-        if self.owner_overwrites.owners_all.get(&user_id).is_some() {
-            return true;
-        }
-
-        if let Some(data) = self.owner_overwrites.owners_single.get(command)
-            && data.value().contains(&user_id)
-        {
-            return true;
-        }
-
-        false
-    }
-
-    /// Sets the user as an owner for every owner command or specifically one owner command
-    /// returning the old value.
-    pub async fn set_owner(&self, user_id: UserId, command: Option<&str>) -> Result<bool, Error> {
-        let Some(command) = command else {
-            if self.owner_overwrites.owners_all.contains(&user_id) {
+    /// To be called in a function that uses the admin check.
+    pub fn check_admin(&self, user_id: UserId, command: &str) -> Result<bool, Error> {
+        if let Some(cached) = self.users.get(&user_id) {
+            if cached.is_admin() {
                 return Ok(true);
             }
 
-            self.insert_user(user_id).await?;
-            query!(
-                "INSERT INTO owner_access (user_id) VALUES ($1)",
-                user_id.get() as i64
-            )
-            .execute(&self.db)
-            .await?;
-
-            self.owner_overwrites.owners_all.insert(user_id);
-            return Ok(false);
-        };
-
-        {
-            if let Some(cmd_cache) = self.owner_overwrites.owners_single.get(command)
-                && cmd_cache.contains(&user_id)
-            {
-                return Ok(true);
+            if let Some(commands) = &cached.allowed_admin_commands {
+                return Ok(commands.iter().any(|c| c.as_str() == command));
             }
         }
 
-        self.insert_user(user_id).await?;
-        query!(
-            "INSERT INTO owner_access (user_id, command_name) VALUES ($1, $2)",
-            user_id.get() as i64,
-            command
-        )
-        .execute(&self.db)
-        .await?;
+        // TODO: query database
 
-        self.owner_overwrites
-            .owners_single
-            .entry(command.to_string())
-            .or_default()
-            .insert(user_id);
         Ok(false)
     }
 
-    /// Removes the user as an owner for every owner command or specifically one owner command
-    /// returning the old value.
-    pub async fn remove_owner(
+    /// Sets or unsets a user's admin access to this bot.
+    pub async fn set_admin(
         &self,
         user_id: UserId,
         command: Option<&str>,
+        enable: bool,
     ) -> Result<bool, Error> {
         let Some(command) = command else {
-            if !self.owner_overwrites.owners_all.contains(&user_id) {
-                return Ok(false);
+            if let Some(cached) = self.users.get(&user_id)
+                && cached.is_admin() == enable
+            {
+                return Ok(true);
             }
-            query!(
-                "DELETE FROM owner_access WHERE user_id = $1",
-                user_id.get() as i64
+
+            sqlx::query!(
+                r#"
+            INSERT INTO users (user_id, is_bot_admin)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id)
+            DO UPDATE SET is_bot_admin = EXCLUDED.is_bot_admin
+            "#,
+                user_id.get() as i64,
+                enable
             )
             .execute(&self.db)
             .await?;
-            self.owner_overwrites.owners_all.remove(&user_id);
 
             return Ok(true);
         };
 
-        let is_owner = {
-            if let Some(cmd_cache) = self.owner_overwrites.owners_single.get(command) {
-                cmd_cache.contains(&user_id)
-            } else {
-                false
-            }
-        };
+        // If command is present, handle add/remove
+        if let Some(cached) = self.users.get(&user_id) {
+            let already_has = cached
+                .allowed_admin_commands
+                .as_ref()
+                .is_some_and(|array| array.iter().any(|c| c == command));
 
-        if !is_owner {
-            return Ok(false);
-        }
-
-        query!(
-            "DELETE FROM owner_access WHERE user_id = $1 AND command_name = $2",
-            user_id.get() as i64,
-            command
-        )
-        .execute(&self.db)
-        .await?;
-
-        let mut should_remove_entry = false;
-        if let Some(mut cmd_cache) = self.owner_overwrites.owners_single.get_mut(command) {
-            cmd_cache.remove(&user_id);
-            if cmd_cache.is_empty() {
-                should_remove_entry = true;
+            if already_has == enable {
+                return Ok(true);
             }
         }
 
-        // Remove the entry if it is now empty
-        if should_remove_entry {
-            self.owner_overwrites.owners_single.remove(command);
+        if enable {
+            // Add command if not present
+            sqlx::query!(
+                r#"
+                INSERT INTO users (user_id, allowed_admin_commands)
+                VALUES ($1, ARRAY[$2])
+                ON CONFLICT (user_id)
+                DO UPDATE SET allowed_admin_commands =
+                    CASE
+                        WHEN NOT $2 = ANY(users.allowed_admin_commands) THEN
+                            array_append(users.allowed_admin_commands, $2)
+                        ELSE users.allowed_admin_commands
+                    END
+                "#,
+                user_id.get() as i64,
+                command
+            )
+            .execute(&self.db)
+            .await?;
+        } else {
+            // Remove command if present
+            sqlx::query!(
+                r#"
+                INSERT INTO users (user_id, allowed_admin_commands)
+                VALUES ($1, ARRAY[]::TEXT[])
+                ON CONFLICT (user_id)
+                DO UPDATE SET allowed_admin_commands = array_remove(users.allowed_admin_commands, $2)
+                "#,
+                user_id.get() as i64,
+                command
+            )
+            .execute(&self.db)
+            .await?;
         }
 
-        Ok(true)
+        Ok(false)
     }
 
     pub async fn get_starboard_msg(&self, msg_id: MessageId) -> Result<StarboardMessage, Error> {
@@ -456,14 +636,42 @@ impl Database {
     }
 
     async fn get_starboard_msg_(&self, msg_id: MessageId) -> Result<StarboardMessage, sqlx::Error> {
-        sqlx::query_as!(StarboardMessage,
-        r#"
-        SELECT id, user_id, username, avatar_url, content, channel_id, message_id, attachment_urls, star_count, starboard_message_id, starboard_message_channel, starboard_status as "starboard_status: StarboardStatus", reply_message_id, forwarded, reply_username
-        FROM starboard
-        WHERE message_id = $1
-        "#, msg_id.get() as i64)
-            .fetch_one(&self.db)
-            .await
+        sqlx::query_as!(
+            StarboardMessage,
+            r#"
+            SELECT
+                s.id,
+                u.user_id,
+                s.username,
+                s.avatar_url,
+                s.content,
+                c.channel_id,
+                m.message_id,
+                s.attachment_urls,
+                s.star_count,
+                sm.message_id AS starboard_message_id,
+                sc.channel_id AS starboard_message_channel,
+                s.starboard_status as "starboard_status: StarboardStatus",
+                rm.message_id AS "reply_message_id?",
+                ru.user_id AS "reply_user_id?",
+                s.forwarded,
+                s.reply_username
+            FROM starboard s
+            JOIN users u ON s.user_id = u.id
+            JOIN messages m ON s.message_id = m.message_id
+            JOIN channels c ON m.channel_id = c.id
+
+            LEFT JOIN messages rm ON s.reply_message_id = rm.message_id
+            LEFT JOIN users ru ON rm.user_id = ru.id
+            LEFT JOIN messages sm ON s.starboard_message_id = sm.message_id
+            LEFT JOIN channels sc ON sm.channel_id = sc.id
+
+            WHERE s.message_id = $1
+            "#,
+            msg_id.get() as i64
+        )
+        .fetch_one(&self.db)
+        .await
     }
 
     pub async fn update_star_count(&self, id: i32, count: i16) -> Result<(), sqlx::Error> {
@@ -486,109 +694,6 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_responses_regexes(
-        &self,
-        guild_id: serenity::GuildId,
-    ) -> Result<Option<GuildCache>, Error> {
-        if let Some(cache) = self.responses.guild.get(&guild_id) {
-            return Ok(Some(cache.clone()));
-        }
-
-        let all_data = sqlx::query!(
-            "SELECT
-                r.id AS regex_id, r.channel_id, r.pattern,
-                r.recurse_channels, r.recurse_threads, r.detection_type,
-                resp.message, resp.emote_id
-            FROM regexes r
-            LEFT JOIN responses resp ON r.id = resp.regex_id
-            WHERE r.guild_id = $1",
-            guild_id.get() as i64
-        )
-        .fetch_all(&self.db)
-        .await?;
-
-        let mut guild_cache = GuildCache::default();
-        let mut emoji_cache: HashMap<i32, ReactionType> = HashMap::new();
-
-        for record in &all_data {
-            let exceptions = sqlx::query!(
-                "SELECT channel_id FROM regex_exceptions WHERE regex_id = $1",
-                record.regex_id
-            )
-            .fetch_all(&self.db)
-            .await
-            .unwrap();
-
-            let exception_channels = exceptions
-                .into_iter()
-                .map(|row| GenericChannelId::new(row.channel_id as u64))
-                .collect::<HashSet<_>>();
-
-            let response = if let Some(message) = &record.message {
-                ResponseType::Message(message.clone())
-            } else if let Some(emote_id) = record.emote_id {
-                let reaction = if let Some(cached_reaction) = emoji_cache.get(&emote_id) {
-                    cached_reaction.clone()
-                } else {
-                    let emote = sqlx::query!(
-                        "SELECT emote_name, discord_id FROM emotes WHERE id = $1",
-                        emote_id
-                    )
-                    .fetch_one(&self.db)
-                    .await
-                    .unwrap();
-
-                    let reaction = if let Some(discord_id) = emote.discord_id {
-                        ReactionType::Custom {
-                            animated: false,
-                            id: serenity::EmojiId::new(discord_id as u64),
-                            name: Some(small_fixed_array::FixedString::from_static_trunc("_")),
-                        }
-                    } else {
-                        ReactionType::Unicode(
-                            serenity::small_fixed_array::FixedString::from_string_trunc(
-                                emote.emote_name,
-                            ),
-                        )
-                    };
-
-                    emoji_cache.insert(emote_id, reaction.clone());
-
-                    reaction
-                };
-
-                ResponseType::Emoji(reaction)
-            } else {
-                ResponseType::Message("Default response".to_string())
-            };
-
-            let regex_data = RegexData {
-                id: record.regex_id,
-                pattern: Regex::new(&record.pattern).unwrap(),
-                recurse_channels: record.recurse_channels,
-                recurse_threads: record.recurse_threads,
-                response,
-                exceptions: exception_channels,
-                detection_type: (record.detection_type as u8).into(),
-            };
-
-            if let Some(channel_id) = record.channel_id {
-                guild_cache
-                    .channel
-                    .entry(GenericChannelId::new(channel_id as u64))
-                    .or_insert_with(Vec::new)
-                    .push(regex_data);
-            } else {
-                guild_cache.global.push(regex_data);
-            }
-        }
-
-        self.responses.guild.insert(guild_id, guild_cache);
-
-        // TODO: figure out an ergonomic way that i could run OCR without deadlocking if i don't clone.
-        Ok(self.responses.guild.get(&guild_id).map(|g| g.clone()))
-    }
-
     /// Check if a starboard is being handled, and if its not, handle it.
     ///
     /// returns if its already being handled.
@@ -604,17 +709,17 @@ impl Database {
     pub async fn update_starboard_fields(&self, m: &StarboardMessage) -> Result<(), Error> {
         sqlx::query!(
             r#"
-        UPDATE starboard
-        SET
-            content = $1,
-            attachment_urls = $2,
-            starboard_status = $3
-        WHERE message_id = $4
-        "#,
+            UPDATE starboard
+            SET
+                content = $1,
+                attachment_urls = $2,
+                starboard_status = $3
+            WHERE message_id = $4
+            "#,
             m.content,
             &m.attachment_urls,
             m.starboard_status as _,
-            m.message_id.get() as i64,
+            self.get_message_dataless(*m.message_id).await?.id,
         )
         .execute(&self.db)
         .await?;
@@ -636,9 +741,10 @@ impl Database {
         &self,
         m: StarboardMessage,
         guild_id: Option<serenity::GuildId>,
+        bot_id: UserId,
     ) -> Result<(), sqlx::Error> {
         let m_id = *m.message_id;
-        let _ = self.insert_starboard_msg_(m, guild_id).await;
+        let _ = self.insert_starboard_msg_(m, guild_id, bot_id).await;
         self.stop_handle_starboard(&m_id);
 
         Ok(())
@@ -648,42 +754,61 @@ impl Database {
         &self,
         mut m: StarboardMessage,
         guild_id: Option<serenity::GuildId>,
+        bot_id: UserId,
     ) -> Result<(), Error> {
-        if let Some(g_id) = guild_id {
-            self.insert_guild(g_id).await?;
-        }
-
-        self.insert_channel(*m.channel_id, guild_id).await?;
-        self.insert_channel(*m.starboard_message_channel, guild_id)
+        let origin_message = self
+            .get_message(*m.message_id, *m.channel_id, guild_id, *m.user_id)
             .await?;
-        self.insert_user(*m.user_id).await?;
+
+        // bot always sends the message
+        let starboard_message = self
+            .get_message(
+                *m.starboard_message_id,
+                *m.starboard_message_channel,
+                guild_id,
+                bot_id,
+            )
+            .await?;
+
+        let reply_message_id = if let Some(reply_message_id) = m.reply_message_id.0 {
+            let reply_user_id = m.reply_user_id.0.ok_or::<Error>(
+                "value pair should never be null at this stage, if you see this, Moxy messed up."
+                    .into(),
+            )?;
+
+            let reply_msg = self
+                .get_message(*reply_message_id, *m.channel_id, guild_id, *reply_user_id)
+                .await?;
+
+            Some(reply_msg.id)
+        } else {
+            None
+        };
 
         let val = match sqlx::query!(
             r#"
-                INSERT INTO starboard (
-                    user_id, username, avatar_url, content, channel_id, message_id,
-                    attachment_urls, star_count, starboard_status,
-                    starboard_message_id, starboard_message_channel, forwarded, reply_message_id, reply_username
-                )
-                VALUES (
-                    $1, $2, $3, $4, $5, $6,
-                    $7, $8, $9, $10, $11,
-                    $12, $13, $14
-                ) RETURNING id
-                "#,
-            m.user_id.get() as i64,
+            INSERT INTO starboard (
+                user_id, username, avatar_url, content, message_id,
+                attachment_urls, star_count, starboard_status,
+                starboard_message_id, forwarded, reply_message_id, reply_username
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11,
+                $12
+            ) RETURNING id
+            "#,
+            origin_message.user_id,
             m.username,
             m.avatar_url,
             m.content,
-            m.channel_id.get() as i64,
-            m.message_id.get() as i64,
+            origin_message.id,
             &m.attachment_urls,
             m.star_count,
             m.starboard_status as _,
-            m.starboard_message_id.get() as i64,
-            m.starboard_message_channel.get() as i64,
+            starboard_message.id,
             m.forwarded,
-            m.reply_message_id.map(|m| m.get() as i64),
+            reply_message_id,
             m.reply_username
         )
         .fetch_one(&self.db)
@@ -731,35 +856,91 @@ impl Database {
         Ok(starboard)
     }
 
+    // TODO: test
     async fn get_starboard_msg_by_starboard_id_(
         &self,
         starboard_msg_id: MessageId,
     ) -> Result<StarboardMessage, sqlx::Error> {
-        sqlx::query_as!(StarboardMessage,
-        r#"
-        SELECT id, user_id, username, avatar_url, content, channel_id, message_id, attachment_urls, star_count, starboard_message_id, starboard_message_channel, starboard_status as "starboard_status: StarboardStatus", reply_message_id, forwarded, reply_username
-        FROM starboard
-        WHERE starboard_message_id = $1
-        "#, starboard_msg_id.get() as i64)
-            .fetch_one(&self.db)
-            .await
+        sqlx::query_as!(
+            StarboardMessage,
+            r#"
+            SELECT
+                s.id,
+                u.user_id,
+                s.username,
+                s.avatar_url,
+                s.content,
+                c.channel_id,
+                m.message_id,
+                s.attachment_urls,
+                s.star_count,
+                sm.message_id AS starboard_message_id,
+                sc.channel_id AS starboard_message_channel,
+                s.starboard_status as "starboard_status: StarboardStatus",
+                rm.message_id AS "reply_message_id?",
+                ru.user_id AS "reply_user_id?",
+                s.forwarded,
+                s.reply_username
+            FROM starboard s
+            JOIN users u ON s.user_id = u.id
+            JOIN messages m ON s.message_id = m.message_id
+            JOIN channels c ON m.channel_id = c.id
+
+            LEFT JOIN messages rm ON s.reply_message_id = rm.message_id
+            LEFT JOIN users ru ON rm.user_id = ru.id
+            LEFT JOIN messages sm ON s.starboard_message_id = sm.message_id
+            LEFT JOIN channels sc ON sm.channel_id = sc.id
+
+            WHERE s.starboard_message_id = $1
+            "#,
+            starboard_msg_id.get() as i64
+        )
+        .fetch_one(&self.db)
+        .await
     }
 
     pub async fn approve_starboard(
         &self,
+        bot_user_id: UserId,
         starboard_message_id: MessageId,
+        starboard_message_channel: GenericChannelId,
         new_message_id: MessageId,
         new_channel_id: GenericChannelId,
     ) -> Result<(), Error> {
         let status = StarboardStatus::Accepted;
 
+        // todo, use starboard config
+        let guild_id = std::env::var("STARBOARD_GUILD")
+            .unwrap()
+            .parse::<u64>()
+            .map(std::convert::Into::into)
+            .ok();
+
+        let new_message_data = self
+            .get_message(
+                new_message_id,
+                new_channel_id,
+                guild_id,
+                // bot user always sends starboard
+                bot_user_id,
+            )
+            .await?;
+
+        let old_message_data = self
+            .get_message(
+                starboard_message_id,
+                starboard_message_channel,
+                guild_id,
+                bot_user_id,
+            )
+            .await?;
+
         query!(
-            "UPDATE starboard SET starboard_status = $1, starboard_message_id = $2, \
-             starboard_message_channel = $3 WHERE starboard_message_id = $4",
+            "UPDATE starboard SET starboard_status = $1, starboard_message_id = $2 WHERE \
+             starboard_message_id = $3",
             status as _,
-            new_message_id.get() as i64,
-            new_channel_id.get() as i64,
-            starboard_message_id.get() as i64,
+            new_message_data.id,
+            old_message_data.id,
         )
         .execute(&self.db)
         .await?;
@@ -785,7 +966,7 @@ impl Database {
         query!(
             "UPDATE starboard SET starboard_status = $1 WHERE starboard_message_id = $2",
             status as _,
-            starboard_message_id.get() as i64,
+            self.get_message_dataless(starboard_message_id).await?.id,
         )
         .execute(&self.db)
         .await?;
@@ -803,12 +984,39 @@ impl Database {
     }
 
     pub async fn get_all_starboard(&self) -> Result<Vec<StarboardMessage>, Error> {
-        let messages = sqlx::query_as!(StarboardMessage,
+        let messages = sqlx::query_as!(
+            StarboardMessage,
             r#"
-            SELECT id, user_id, username, avatar_url, content, channel_id, message_id, attachment_urls, star_count, starboard_message_id, starboard_message_channel, starboard_status as "starboard_status: StarboardStatus", reply_message_id, forwarded, reply_username
-            FROM starboard"#)
-                .fetch_all(&self.db)
-                .await?;
+            SELECT
+                s.id,
+                u.user_id,
+                s.username,
+                s.avatar_url,
+                s.content,
+                c.channel_id,
+                m.message_id,
+                s.attachment_urls,
+                s.star_count,
+                sm.message_id AS starboard_message_id,
+                sc.channel_id AS starboard_message_channel,
+                s.starboard_status as "starboard_status: StarboardStatus",
+                rm.message_id AS "reply_message_id?",
+                ru.user_id AS "reply_user_id?",
+                s.forwarded,
+                s.reply_username
+            FROM starboard s
+            JOIN users u ON s.user_id = u.id
+            JOIN messages m ON s.message_id = m.message_id
+            JOIN channels c ON m.channel_id = c.id
+
+            LEFT JOIN messages rm ON s.reply_message_id = rm.message_id
+            LEFT JOIN users ru ON rm.user_id = ru.id
+            LEFT JOIN messages sm ON s.starboard_message_id = sm.message_id
+            JOIN channels sc ON sm.channel_id = sc.id
+            "#,
+        )
+        .fetch_all(&self.db)
+        .await?;
 
         let mut guard = self.starboard.lock();
 
@@ -828,15 +1036,13 @@ impl Database {
         starcount: u8,
     ) -> Result<(), Error> {
         // TODO: use starboard config directly to avoid panic
-        self.insert_channel(
-            channel_id,
-            std::env::var("STARBOARD_GUILD")
-                .unwrap()
-                .parse::<u64>()
-                .map(std::convert::Into::into)
-                .ok(),
-        )
-        .await?;
+        let guild_id = std::env::var("STARBOARD_GUILD")
+            .unwrap()
+            .parse::<u64>()
+            .map(std::convert::Into::into)
+            .ok();
+
+        self.get_channel(channel_id, guild_id).await?;
 
         sqlx::query!(
             r#"
@@ -845,7 +1051,7 @@ impl Database {
             ON CONFLICT (channel_id) DO UPDATE
             SET star_count = EXCLUDED.star_count
             "#,
-            channel_id.get() as i64,
+            self.get_channel(channel_id, guild_id).await?.0,
             i16::from(starcount)
         )
         .execute(&self.db)
@@ -883,7 +1089,7 @@ impl Database {
     pub async fn get_gamemode(&self, user_id: UserId, osu_id: u32) -> Result<GameMode, Error> {
         let res = query!(
             "SELECT gamemode FROM verified_users WHERE user_id = $1 AND osu_id = $2",
-            user_id.get() as i64,
+            &self.get_user(user_id).await?.id,
             osu_id as i32
         )
         .fetch_one(&self.db)
@@ -895,7 +1101,7 @@ impl Database {
     pub async fn inactive_user(&self, user_id: UserId) -> Result<(), Error> {
         Ok(query!(
             "UPDATE verified_users SET is_active = FALSE WHERE user_id = $1",
-            user_id.get() as i64,
+            &self.get_user(user_id).await?.id,
         )
         .execute(&self.db)
         .await
@@ -905,7 +1111,7 @@ impl Database {
     pub async fn update_last_updated(
         &self,
         user_id: UserId,
-        time: i64,
+        time: chrono::DateTime<chrono::Utc>,
         rank: Option<Option<u32>>,
         map_status: u8,
         roles: &[RoleId],
@@ -914,7 +1120,7 @@ impl Database {
             query!(
                 "UPDATE verified_users SET last_updated = $2, rank = $3, map_status = $4, \
                  verified_roles = $5 WHERE user_id = $1",
-                user_id.get() as i64,
+                &self.get_user(user_id).await?.id,
                 time,
                 rank.map(|r| r as i32),
                 i16::from(map_status),
@@ -926,7 +1132,7 @@ impl Database {
             query!(
                 "UPDATE verified_users SET last_updated = $2, map_status = $3, verified_roles = \
                  $4 WHERE user_id = $1",
-                user_id.get() as i64,
+                &self.get_user(user_id).await?.id,
                 time,
                 i16::from(map_status),
                 &roles.iter().map(|r| r.get() as i64).collect::<Vec<_>>(),
@@ -939,9 +1145,9 @@ impl Database {
     }
 
     pub async fn verify_user(&self, user_id: UserId, osu_id: u32) -> Result<(), Error> {
-        let now = Utc::now().timestamp();
+        let now = Utc::now();
 
-        self.insert_user(user_id).await?;
+        self.get_user(user_id).await?;
 
         query!(
             r#"
@@ -953,7 +1159,7 @@ impl Database {
                 is_active = EXCLUDED.is_active,
                 gamemode = 0
             "#,
-            user_id.get() as i64,
+            &self.get_user(user_id).await?.id,
             osu_id as i32,
             now,
             true,
@@ -1015,9 +1221,14 @@ impl Database {
     }
 
     // temporary function to give access to the inner command overwrites while i figure something out.
+    // TODO: stop this lamo
     #[must_use]
-    pub fn inner_overwrites(&self) -> &Checks {
-        &self.owner_overwrites
+    pub fn inner_overwrites(&self) -> Vec<Arc<ApplicationUser>> {
+        self.users
+            .iter()
+            .filter(|u| u.is_admin() | u.allowed_admin_commands.is_some())
+            .map(|c| c.clone())
+            .collect()
     }
 }
 
@@ -1042,4 +1253,12 @@ impl Future for WaitForOsuAuth {
             Poll::Pending => Poll::Pending,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MessageData {
+    pub id: i64,
+    pub channel_id: i32,
+    pub guild_id: Option<i32>,
+    pub user_id: i32,
 }

@@ -7,7 +7,7 @@ use crate::{Error, PrefixContext};
 #[lumi::command(
     rename = "+",
     prefix_command,
-    category = "Owner - Roles",
+    category = "Admin - Roles",
     owners_only,
     hide_in_help,
     guild_only
@@ -161,7 +161,7 @@ fn find_unique_role(
 #[lumi::command(
     rename = "-",
     prefix_command,
-    category = "Owner - Roles",
+    category = "Admin - Roles",
     owners_only,
     hide_in_help,
     guild_only

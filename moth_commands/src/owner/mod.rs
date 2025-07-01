@@ -32,15 +32,14 @@ pub fn commands() -> Vec<crate::Command> {
 /// I use this check instead of the default `owners_only` check
 /// When i want to be able to temporarily give access to specific owner commands
 /// This executes after `command_check` is executed, so this works.
-pub async fn owner(ctx: Context<'_>) -> Result<bool, Error> {
+pub async fn admin(ctx: Context<'_>) -> Result<bool, Error> {
     let user_id = &ctx.author().id;
     // Owners will always be able to execute.
     if ctx.framework().options.owners.contains(user_id) {
         return Ok(true);
     }
 
-    Ok(ctx
-        .data()
+    ctx.data()
         .database
-        .check_owner(ctx.author().id, &ctx.command().name))
+        .check_admin(ctx.author().id, &ctx.command().name)
 }

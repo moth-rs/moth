@@ -85,16 +85,16 @@ pub async fn verify(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-use crate::owner::owner;
+use crate::owner::admin;
 
 #[lumi::command(
     rename = "force-verify",
     aliases("force-verify"),
     prefix_command,
     guild_only,
-    category = "Owner - osu",
+    category = "Admin - osu",
     hide_in_help,
-    check = "owner"
+    check = "admin"
 )]
 pub async fn verify_force(
     ctx: Context<'_>,

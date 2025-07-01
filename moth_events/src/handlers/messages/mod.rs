@@ -7,14 +7,13 @@ use ::serenity::all::GenericChannelId;
 pub use database::EMOJI_REGEX;
 use invites::moderate_invites;
 pub mod invites;
-mod responses;
 
 use crate::helper::{get_channel_name, get_guild_name, get_guild_name_override};
 use crate::{Data, Error};
 
 use moth_ansi::{CYAN, DIM, HI_BLACK, HI_RED, RESET};
 
-use database::{insert_deletion, insert_edit, insert_message};
+use database::insert_message;
 use lumi::serenity_prelude::{
     self as serenity, Colour, CreateEmbed, CreateEmbedFooter, CreateMessage, GuildId, Message,
     MessageId, UserId,
@@ -61,9 +60,9 @@ pub async fn message(ctx: &serenity::Context, msg: &Message, data: Arc<Data>) ->
         check_event_dm_regex(ctx, msg, &guild_name, patterns.as_deref()),
         handle_dm(ctx, msg),
         insert_message(&data.database, msg),
+        // TODO: check why this broke
         moderate_invites(ctx, &data, msg),
         auto_super_poop(ctx, msg),
-        responses::response_handler(ctx, msg),
     );
 
     Ok(())
@@ -141,8 +140,8 @@ async fn auto_super_poop(ctx: &serenity::Context, msg: &Message) -> Result<(), E
                 .await?;
 
             sqlx::query!(
-                "DELETE FROM auto_pooped WHERE user_id = $1",
-                msg.author.id.get() as i64
+                "DELETE FROM auto_bad_role WHERE user_id = $1",
+                data.database.get_user(msg.author.id).await?.id,
             )
             .execute(&data.database.db)
             .await?;
@@ -166,8 +165,8 @@ async fn auto_super_poop(ctx: &serenity::Context, msg: &Message) -> Result<(), E
         if should_be_pooped && !has_super_poop_role {
             // user should be pooped, does not have the role.
             sqlx::query!(
-                "INSERT INTO auto_pooped (user_id) VALUES ($1)",
-                msg.author.id.get() as i64
+                "INSERT INTO auto_bad_role (user_id) VALUES ($1)",
+                data.database.get_user(msg.author.id).await?.id,
             )
             .execute(&data.database.db)
             .await?;
@@ -271,8 +270,6 @@ pub async fn message_edit(
                 attachments.as_deref().unwrap_or(""),
                 embeds.as_deref().unwrap_or("")
             );
-
-            let _ = insert_edit(&data.database, new_message).await;
         }
     } else {
         println!(
@@ -317,8 +314,6 @@ pub async fn message_delete(
             attachments_fmt.as_deref().unwrap_or(""),
             embeds_fmt.as_deref().unwrap_or("")
         );
-
-        let _ = insert_deletion(&data.database, &message).await;
     } else {
         println!(
             "{HI_RED}{DIM}A message (ID:{deleted_message_id}) was deleted but was not in \

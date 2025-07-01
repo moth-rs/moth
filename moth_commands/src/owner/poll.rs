@@ -4,12 +4,12 @@ use serenity::all::{
     ChannelType, CreateMessage, CreatePoll, CreatePollAnswer, GuildChannel, MessageId, ThreadId,
 };
 
-use crate::{owner::owner, Context, Error};
+use crate::{owner::admin, Context, Error};
 
 #[lumi::command(
     prefix_command,
-    check = "owner",
-    category = "Owner - Commands",
+    check = "admin",
+    category = "Admin - Commands",
     hide_in_help,
     guild_only
 )]

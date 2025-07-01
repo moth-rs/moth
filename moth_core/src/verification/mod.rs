@@ -12,7 +12,7 @@ use axum::{
     response::Html,
     routing::get,
 };
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use roles::{LOG_CHANNEL, MetadataType, UserMapHolder, maybe_update};
 use rosu_v2::{Osu, prelude::GameMode};
 use sender::VerificationCommand;
@@ -241,8 +241,7 @@ pub async fn task(
                     };
 
                     for user in users {
-                        let last_updated_time = Utc.timestamp_opt(user.last_updated, 0);
-                        let target_time = last_updated_time.latest().unwrap() + chrono::Duration::days(1);
+                        let target_time = user.last_updated + chrono::Duration::days(1);
 
                         let now = Utc::now();
                         let duration = target_time.signed_duration_since(now);

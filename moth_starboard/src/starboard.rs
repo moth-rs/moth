@@ -4,8 +4,8 @@ use crate::{
 };
 use lumi::serenity_prelude as serenity;
 use moth_core::data::database::{
-    ChannelIdWrapper, MaybeMessageIdWrapper, MessageIdWrapper, StarboardMessage, StarboardStatus,
-    UserIdWrapper,
+    ChannelIdWrapper, MaybeMessageIdWrapper, MaybeUserIdWrapper, MessageIdWrapper,
+    StarboardMessage, StarboardStatus, UserIdWrapper,
 };
 use std::sync::Arc;
 
@@ -270,9 +270,21 @@ async fn new(
         .take(10)
         .collect();
 
+    let reply_message_id = msg
+        .referenced_message
+        .as_ref()
+        .map(|m| MessageIdWrapper(m.id));
+    let reply_user_id = msg
+        .referenced_message
+        .as_ref()
+        .map(|m| UserIdWrapper(m.author.id));
+    let reply_username = msg
+        .referenced_message
+        .as_ref()
+        .map(|m| m.author.name.to_string());
+
     let mut starboard_msg = StarboardMessage {
-        // gets corrected on insert.
-        id: 0,
+        id: 0, // corrected on insert
         user_id: UserIdWrapper(msg.author.id),
         username: msg.author.name.to_string(),
         avatar_url: msg.author.avatar_url(),
@@ -282,16 +294,12 @@ async fn new(
         attachment_urls,
         star_count,
         starboard_status: StarboardStatus::InReview,
-        // gets corrected on insert.
-        starboard_message_id: MessageIdWrapper(0.into()),
+        starboard_message_id: MessageIdWrapper(0.into()), // corrected on insert
         starboard_message_channel: ChannelIdWrapper(data.starboard_config.queue_channel),
         forwarded,
-        reply_message_id: MaybeMessageIdWrapper(
-            msg.referenced_message
-                .as_ref()
-                .map(|m| MessageIdWrapper(m.id)),
-        ),
-        reply_username: msg.referenced_message.map(|m| m.author.name.to_string()),
+        reply_message_id: MaybeMessageIdWrapper(reply_message_id),
+        reply_user_id: MaybeUserIdWrapper(reply_user_id),
+        reply_username,
     };
 
     let message = starboard_message(ctx, data, &starboard_msg);
@@ -306,7 +314,9 @@ async fn new(
 
     // woo hardcoding
     data.database
-        .insert_starboard_msg(starboard_msg, Some(data.starboard_config.guild_id))
+        .insert_starboard_msg(starboard_msg, Some(data.starboard_config.guild_id), {
+            ctx.cache.current_user().id
+        })
         .await?;
 
     Ok(())

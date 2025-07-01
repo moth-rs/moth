@@ -300,7 +300,7 @@ pub async fn update_roles(
         return false;
     }
 
-    let time = chrono::Utc::now().timestamp();
+    let time = chrono::Utc::now();
     let _ = ctx
         .data::<Data>()
         .database
