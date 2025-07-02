@@ -2042,6 +2042,7 @@ dependencies = [
  "handlebars",
  "leptess",
  "lumi",
+ "mini-moka",
  "parking_lot",
  "rand 0.9.1",
  "regex",

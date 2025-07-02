@@ -27,3 +27,4 @@ axum = "0.8.4"
 tokio-util = { version = "0.7.15", features = ["time"] }
 tower-http = { version = "0.6", features = ["cors"] }
 bool_to_bitflags = "0.1.3"
+mini-moka = "0.10.3"

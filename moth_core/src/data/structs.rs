@@ -1,3 +1,4 @@
+use chrono::TimeZone;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
 use rosu_v2::Osu;
@@ -200,15 +201,19 @@ impl Data {
     async fn get_activity_check_psql(&self, user_id: UserId) -> Option<DmActivity> {
         let result = sqlx::query!(
             "SELECT last_announced, until, count FROM dm_activity WHERE user_id = $1",
-            i64::from(user_id)
+            // TODO: check if i should be joining here or if pulling from cache is actually faster.
+            match self.database.get_user(user_id).await {
+                Ok(user) => user.id,
+                Err(_) => return None,
+            }
         )
         .fetch_one(&self.database.db)
         .await;
 
         match result {
             Ok(record) => Some(DmActivity::new(
-                record.last_announced.unwrap(),
-                record.until,
+                record.last_announced.unwrap().timestamp(),
+                record.until.map(|t| t.timestamp()),
                 record.count.unwrap(),
             )),
             Err(err) => {
@@ -232,9 +237,12 @@ impl Data {
         // count will have already been incremented.
         let _ = sqlx::query!(
             "UPDATE dm_activity SET until = $1, count = $2 WHERE user_id = $3",
-            until,
+            chrono::Utc.timestamp_opt(until, 0).unwrap(),
             count,
-            i64::from(user_id)
+            match self.database.get_user(user_id).await {
+                Ok(user) => user.id,
+                Err(_) => return,
+            }
         )
         .execute(&self.database.db)
         .await;
@@ -255,9 +263,12 @@ impl Data {
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (user_id) DO UPDATE
             SET last_announced = $2, until = $3, count = $4",
-            i64::from(user_id),
-            announced,
-            until,
+            match self.database.get_user(user_id).await {
+                Ok(user) => user.id,
+                Err(_) => return,
+            },
+            chrono::Utc.timestamp_opt(announced, 0).unwrap(),
+            chrono::Utc.timestamp_opt(until, 0).unwrap(),
             count.unwrap_or(0)
         )
         .execute(&self.database.db)

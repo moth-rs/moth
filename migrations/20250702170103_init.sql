@@ -18,7 +18,7 @@ CREATE TABLE users (
     -- allowed to use commands marked as such
     is_bot_admin BOOLEAN DEFAULT FALSE NOT NULL,
     -- allowed to use specific admin commands
-    allowed_admin_commands TEXT[],
+    allowed_admin_commands TEXT[]
 );
 
 CREATE TYPE CommandType AS ENUM ('prefix', 'application');
@@ -30,10 +30,10 @@ CREATE TABLE executed_commands (
     guild_id INT REFERENCES guilds(id),
     command TEXT NOT NULL,
     command_type CommandType NOT NULL,
-    executed_at TIMESTAMPZ NOT NULL,
+    executed_at TIMESTAMPTZ NOT NULL,
     executed_successfully BOOLEAN NOT NULL,
     error_text TEXT
-)
+);
 
 CREATE TABLE audit_log (
     audit_log_id BIGINT PRIMARY KEY,
@@ -51,10 +51,10 @@ CREATE TABLE audit_log (
 CREATE TABLE role_snapshots (
     id BIGSERIAL PRIMARY KEY,
     user_id INT NOT NULL REFERENCES users(id),
-    guild_id INT NOT NULL REFERENCES guilds(id)
+    guild_id INT NOT NULL REFERENCES guilds(id),
     roles BIGINT[],
-    snapshot_taken TIMESTAMPZ
-)
+    snapshot_taken TIMESTAMPTZ
+);
 
 CREATE TABLE messages (
     id BIGSERIAL PRIMARY KEY,
@@ -69,8 +69,8 @@ CREATE TABLE messages (
 
 CREATE TABLE dm_activity (
     user_id INT PRIMARY KEY REFERENCES users(id),
-    last_announced TIMESTAMPZ,
-    until TIMESTAMPZ,
+    last_announced TIMESTAMPTZ,
+    until TIMESTAMPTZ,
     count SMALLINT
 );
 
@@ -106,17 +106,6 @@ CREATE TABLE emotes (
 CREATE INDEX idx_discord_id ON emotes(discord_id);
 CREATE INDEX idx_emote_name_discord_id ON emotes(emote_name, discord_id);
 
-CREATE UNIQUE INDEX emote_name_discord_id_unique
-    ON emotes (emote_name, discord_id);
-
-CREATE UNIQUE INDEX emote_name_null_discord_id_unique
-    ON emotes (emote_name)
-    WHERE discord_id IS NULL;
-
-CREATE UNIQUE INDEX unique_user_message_emote_reaction
-    ON emote_usage (message_id, user_id, emote_id)
-    WHERE usage_type = 'reaction';
-
 CREATE TABLE emote_usage (
     id SERIAL PRIMARY KEY,
     message_id BIGINT NOT NULL,
@@ -128,6 +117,18 @@ CREATE TABLE emote_usage (
     FOREIGN KEY (emote_id) REFERENCES emotes(id),
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE UNIQUE INDEX emote_name_discord_id_unique
+    ON emotes (emote_name, discord_id);
+
+CREATE UNIQUE INDEX emote_name_null_discord_id_unique
+    ON emotes (emote_name)
+    WHERE discord_id IS NULL;
+
+CREATE UNIQUE INDEX unique_user_message_emote_reaction
+    ON emote_usage (message_id, user_id, emote_id)
+    WHERE usage_type = 'reaction';
+
 
 CREATE TABLE blocked_checked_emotes (
     guild_id INT NOT NULL REFERENCES guilds(id),
@@ -172,6 +173,7 @@ CREATE TABLE starboard (
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (message_id) REFERENCES messages(id),
     FOREIGN KEY (starboard_message_channel) REFERENCES channels(id),
+    FOREIGN KEY (starboard_message_channel) REFERENCES messages(id),
     FOREIGN KEY (reply_message_id) REFERENCES messages(id)
 );
 
@@ -180,7 +182,7 @@ CREATE TABLE starboard_overrides(
     channel_id INT NOT NULL PRIMARY KEY,
     star_count SMALLINT NOT NULL,
     FOREIGN KEY (channel_id) REFERENCES channels(id)
-)
+);
 
 
 CREATE TABLE regexes (
@@ -209,7 +211,7 @@ CREATE TABLE responses (
     emote_id INT REFERENCES emotes(id) ON DELETE CASCADE,
     -- there must be at least *something* to respond with.
     CHECK (
-      message IS NOT NULL OR emote_id IS NOT NULL
+      content IS NOT NULL OR emote_id IS NOT NULL
     )
 );
 
